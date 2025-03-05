@@ -1,0 +1,1317 @@
+---
+title: "CW23"
+author: "Ethan McFadzean and Morgan Williams"
+date: "2023-11-24"
+output: html_document
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(tzdb)
+```
+
+## Question 1 [4 marks]
+
+Consider the following observed sample: 
+
+```{r}
+#| code-fold: show
+y_sample_q1 <- scan("http://people.bath.ac.uk/kai21/ASI/CW_2023/y_sample_q1.txt")
+```
+
+Plot 40 contours of the negative loglikelihood function of the parameter $\boldsymbol{\lambda}$ over the region defined by $-\pi/2<\lambda_1<\pi/2$ and $0<\lambda_2<50$. The contours should be sufficiently smooth and cover the entire region. You should indicate a smaller region delimited by a contour that contains the global minimum.
+
+
+## Solution to Question 1
+
+First we define the negative log-likelihood function. We use the reparametrisation $\theta_1 = tan(\lambda_1)$ and $\theta_2 = log(\lambda_2)$:
+```{r}
+expr_1 <- expression(-log(1 + (y/(exp(theta2) + 2*j))^2))
+expr_2 <- expression(
+            atan(theta1)*y 
+            + exp(theta2)*log(cos(atan(theta1)))
+            + (exp(theta2) - 2)*log(2)
+            + 2*lgamma(exp(theta2)/2)
+            - log(pi)
+            - lgamma(exp(theta2))
+            ) 
+
+aux_1 <- deriv(expr_1,c("theta1","theta2"),function.arg=c("theta1","theta2","y","j"),hessian=TRUE) 
+aux_2 <- deriv(expr_2,c("theta1", "theta2"),function.arg=c("theta1","theta2","y"),hessian=TRUE) 
+
+
+nll <- function(theta=c(1,1),y=1, n=1) {
+  
+  res_2 <- aux_2(theta[1],theta[2],y)
+  
+  n_obs = length(y)
+  inside = rep(0,n_obs)
+  
+  for (i in 1:n_obs){
+      
+     inside[i] <- sum(aux_1(theta[1],theta[2],y[i],0:n))
+  
+}
+  -(sum(as.numeric(res_2)) + sum(inside))
+
+}
+
+```
+
+Now we can use this function for the contour plot, the contour coloured red is the region that contains the global minimum.
+```{r, cache=TRUE, warning=FALSE, fig.height=7}
+lambda1 <- seq(-pi/2  , pi/2 ,length=100)
+lambda1 <- lambda1[-1]
+lambda1 <- lambda1[-99]
+lambda2 <- seq(0,50,length=100)
+lambda2 <- lambda2[-1]
+lambda2 <- lambda2[-99]
+
+M<-matrix(NA,
+          nrow = 98,
+          ncol = 98)
+
+for (i in seq_along(lambda1)){
+  for (j in seq_along(lambda2)){
+    
+    M[i,j]<-nll(theta = c(tan(lambda1[i]),log(lambda2[j])),
+                y = y_sample_q1,
+                n = 100) 
+    
+  }
+}
+
+levels<-quantile(x     = M,
+                 probs = seq(from   = 0.005,
+                                 to     = 0.9,
+                                 length = 40))
+
+colours <- c("red", rep("black", length(levels) - 1))
+
+contour(x      = lambda1,
+        y      = lambda2,
+        z      = M,
+        levels = levels,
+        col    = colours,
+        main   = "Contours of the Negative Log-Likelihood",
+        xlab   = expression(lambda[1]),
+        ylab   = expression(lambda[2]))
+
+```
+
+
+
+## Question 2 [6 marks]
+
+Find the maximum likelihood estimate $\widehat{\lambda}=(\hat{\lambda}_1,\hat{\lambda}_2)^T$ by 
+picking the best out of 100 optimisations (using the BFGS algorithm) where each optimisation uses a different initial value. The following data frame gives the list of  initial values to be used.
+
+```{r}
+#| code-fold: show
+ L0 <-read.table("http://people.bath.ac.uk/kai21/ASI/CW_2023/starting_vals_q2.txt")
+```
+
+## Solution to Question 2
+
+We need to define the gradient function to use in the BFGS algorithm:
+```{r}
+
+grad <- function(theta=c(1,1),y=1,n=1){
+  
+  res_2 <- aux_2(theta[1],theta[2],y)
+  
+  n_obs = length(y)
+  ins_gr = matrix(NA,nrow=n_obs,ncol=length(theta))
+  
+  for (i in 1:n_obs){
+      
+     ins_gr[i,] <- apply(attr(aux_1(theta[1],theta[2],y[i],0:n),"gradient"),2,sum)
+  
+  }
+  
+  - (apply(attr(res_2,"gradient"),2,sum) + colSums(ins_gr))
+  
+}
+
+```
+
+Now we put the nll and grad functions into the BFGS algorithm to find the MLE, making sure we use the starting values given in the question:
+```{r}
+
+fit_optim  <- function(par1_data,
+                       par2_data,
+                       fn ,
+                       gr ,
+                       method = "BFGS",
+                       hessian   = T,
+                       y,
+                       n,
+                       N_samples = 100){
+  
+fit <- vector("list",
+              length = N_samples)
+
+for (i in 1:N_samples){
+  
+     fit[[i]]<-
+          optim(par = c(par1_data[i],par2_data[i]),
+          fn  = fn,
+          gr  = gr,
+          y =y,
+          n=n,
+          method  =method ,
+          hessian = hessian)
+     
+    
+  # check for numerical convergence first 
+  no_convergence <- fit[[i]]$convergence > 0
+  
+  # checks if asymptotic variances are possible to obtain
+  no_variance <- inherits(try(solve(fit[[i]]$hessian),
+                              silent = T), 
+                          "try-error")
+
+  null_variance <- F
+  NA_variance   <- F
+
+  if (!no_variance){
+    # checks if asymptotic variance are NaN
+    NA_variance <- as.logical(sum(is.nan(diag(solve(fit[[i]]$hessian)))))
+  
+  if(!NA_variance){
+    # checks if asymptotic variance are zero up to machine precision
+    null_variance <- as.logical(sum(diag(solve(fit[[i]]$hessian))< .Machine$double.eps ^ 0.5))
+    }
+  }
+  
+  fail <- no_variance | no_convergence | NA_variance | null_variance 
+  
+  if (fail){
+    fit[[i]]$value <- NA
+  }
+  
+ 
+  
+} 
+  
+  extract_negloglik <- 
+  function(optim_object){
+      optim_object$value
+  }
+# selects the optimisation with minimum negative loglikelihood
+nll_vals<-
+  lapply(X   = fit,
+        FUN  = extract_negloglik)
+
+fit[[which.min(nll_vals)]] # return the final selected optimisation
+
+  
+}
+
+
+```
+
+```{r, cache=TRUE, warning=FALSE}
+theta1_op = tan(L0$lambda1)
+theta2_op = log(L0$lambda2)
+
+fit1 <-fit_optim(     par1_data = theta1_op,
+                      par2_data = theta2_op,
+                      fn      = nll,
+                      gr      = grad,
+                      method  = "BFGS",
+                      y       = y_sample_q1,
+                      n       = 100,
+                      hessian = T)
+
+fit1
+
+mle = c(atan(fit1$par[1]),exp(fit1$par[2]))
+mle
+
+```
+
+Hence our MLE is (0.73,5.86).
+
+
+## Question 3 [4 marks]
+
+Check the sensitivity of the MLE to the choice of $N$ by plotting (separately) the values of $\hat{\lambda}_1$ and $\hat{\lambda}_2$ as function of $\log_{10}(N)$. You should use the values $10^1,10^2, 10^3,10^4,10^5,10^6$ for $N$. What conclusions can you make from these two plots?
+
+## Solution to Question 3
+
+```{r, warning=FALSE}
+
+fit_p <- matrix(NA, nrow=6   , ncol=2)
+for (i in 1:6){
+  fit_p[i,] <- optim( par = c(fit1$par[1],fit1$par[2]),
+                      fn      = nll,
+                      gr      = grad,
+                      method  = "BFGS",
+                      y       = y_sample_q1,
+                      n       = 10^i,
+                      hessian = T)$par
+}
+fit_p[,1] <- atan(fit_p[,1])
+fit_p[,2] <- exp(fit_p[,2])
+plot(fit_p[,1],
+     xlab = "log(N)",
+     ylab = expression(lambda[1]))
+lines(fit_p[,1])
+plot(fit_p[,2],
+     xlab = "log(N)",
+     ylab = expression(lambda[2]))
+lines(fit_p[,2])
+```
+
+From the plots, we can conclude that the parameter values converge as N gets larger. Hence, when N reaches 10^4, N is 'large enough' to approximate the infinite sum in the density function.
+
+## Question 4 [4 marks]
+
+Compute the maximum likelihood estimate of the mean parameter
+$$\mu(\boldsymbol{\lambda}_*)=E[Y|\boldsymbol{\lambda}_*]=\int_{\mathcal R} y\,f(y|\boldsymbol{\lambda}_*)dy\,.$$
+Also compute an asymptotic 95% confidence interval for $\mu(\boldsymbol{\lambda}_*)$. State clearly any assumptions you have made.
+
+
+
+## Solution to Question 4
+
+Considering the integral of the density $\int_{\mathcal R}f(y|\boldsymbol{\lambda}_*)dy=1$. Differentiating both sides by $\lambda_1$ gives $0 = \mu(\boldsymbol{\lambda}_*) - \lambda_2\tan(\lambda_1)$ hence $\mu(\boldsymbol{\lambda}_*) = \lambda_2\tan(\lambda_1)$.
+
+Hence we can use our MLE for $\boldsymbol{\lambda}_*$ to get the MLE for $\mu(\boldsymbol{\lambda}_*)$:
+```{r}
+mle_mean = mle[2]*tan(mle[1])
+mle_mean
+```
+
+For the 95% confidence interval, we must compute the Jacobian of the function $g(\boldsymbol{\theta}_*) = \mu(\boldsymbol{\theta}_*) = exp(\theta_2)tan(atan(\theta_1)) = exp(\theta_2)\theta_1$ which is smooth. Hence under assumptions A1-A5 in the lecture notes, using the delta method along with the inverse hessian approximating the Fisher information matrix, we can estimate the variance of the mean as $\boldsymbol{J_g}(\boldsymbol{\theta}_*)\boldsymbol{\mathcal{I}}^{-1}(\boldsymbol{\theta}_*)\boldsymbol{J_g^T}(\boldsymbol{\theta}_*)$.
+
+We compute the Jacobian as $(\exp(\theta_2) , \theta_1\exp(\theta_2))$.
+```{r}
+
+jacobian_mean <- matrix(c(exp(fit1$par[2]),fit1$par[1]*exp(fit1$par[2])),nrow=1,ncol=2)
+jacobian_mean
+
+inv_hess <- solve(fit1$hessian)
+inv_hess
+
+var_mean <- jacobian_mean %*% inv_hess %*% t(jacobian_mean)
+var_mean
+
+```
+
+And this can be used to compute the 95% confidence interval for $\mu(\boldsymbol{\lambda}_*)$:
+```{r}
+ci_mean <- c(mle_mean - 1.96*sqrt(var_mean), mle_mean + 1.96*sqrt(var_mean))
+ci_mean
+```
+
+
+## Question 5 [4 marks]
+
+Compute an asymptotic 95% confidence interval for the unknown parameter $\lambda^*_2$ using:
+
+* the asymptotic normal approximation to the distribution $\hat{\lambda}_2$
+
+* the asymptotic normal approximation to the distribution $\log( \hat{\lambda}_2)$
+
+
+
+## Solution to Question 5
+
+## (i)
+Starting with the asymptotic normal approximation of $\hat{\lambda}_2$. We have the inverse hessian for $\hat{\theta}_2 = \log(\hat{\lambda}_2)$, so we must use the delta method to get the normal approximation for $\hat{\lambda}_2$, using the function $g(\boldsymbol{\theta}_*) = \exp(\theta_2)$. 
+
+The Jacobian is therefore $(0,\exp(\theta_2))$.
+```{r}
+jacobian_2 <- matrix(c(0,exp(fit1$par[2])),nrow=1,ncol=2)
+jacobian_2
+```
+And hence we can compute the variance:
+```{r}
+
+var_2 <- jacobian_2 %*% inv_hess %*% t(jacobian_2)
+var_2
+
+```
+And hence we can compute the 95% asymptotic CI:
+```{r}
+
+ci_2 <- c(mle[2] - 1.96*sqrt(var_2), mle[2] + 1.96*sqrt(var_2))
+ci_2
+
+```
+
+## (ii)
+Now we compute the same CI using the normal approximation for $\log(\lambda_2)$. Luckily, in our optimization this is just $\theta_2$ so we already have the correct variance using the inverse hessian. Hence, we compute the 95% CI as:
+```{r}
+
+ci_3 <- exp(c(fit1$par[2] - 1.96*sqrt(inv_hess[2,2]),fit1$par[2] + 1.96*sqrt(inv_hess[2,2])))
+ci_3
+
+```
+
+
+
+## Question 6 [4 marks]
+
+Use the generalised likelihood ratio to test the hypotheses:
+
+$$H_0:\,\mu(\boldsymbol{\lambda}_*)=5\qquad \mbox{vs}\qquad H_a:\,\mu(\boldsymbol{\lambda}_*)\neq 5$$
+
+using a significance level $\alpha=0.05$.
+
+Separately, also test 
+
+$$H_0:\,\lambda^*_2=5\qquad \mbox{vs}\qquad H_a:\,\lambda^*_2\neq 5$$
+
+using a significance level $\alpha=0.05$.
+
+## Solution to Question 6
+
+## (i)
+In terms of $\boldsymbol{\theta}_*$, and using our simplified mean function, the null hypothesis is $H_0:\,\exp(\theta^*_2)\theta_1^*=5$ or written differently, $H_0:\,\theta_2^*=\log(5/\theta_1^*)$. Hence, we now have a model in terms of $\theta_1$ only, so we find the MLE again in this case. We start by defining the new negative loglikeliood and gradient functions:
+```{r}
+
+expr0_1 <- expression(-log(1 + (y/((5/theta1) + 2*j))^2))
+expr0_2 <- expression(
+            atan(theta1)*y 
+            + (5/theta1)*log(cos(atan(theta1)))
+            + ((5/theta1) - 2)*log(2)
+            + 2*lgamma((5/theta1)/2)
+            - log(pi)
+            - lgamma((5/theta1))
+            ) 
+
+
+aux0_1 <- deriv(expr0_1,c("theta1"),function.arg=c("theta1","y","j"),hessian=TRUE) 
+aux0_2 <- deriv(expr0_2,c("theta1"),function.arg=c("theta1","y"),hessian=TRUE) 
+
+nll_0 <- function(theta=1,y=1, n=1) {
+  
+  res0_2 <- aux0_2(theta,y)
+  
+  n_obs = length(y)
+  inside_0 = rep(0,n_obs)
+  
+  for (i in 1:n_obs){
+      
+     inside_0[i] <- sum(aux0_1(theta,y[i],0:n))
+  
+}
+  -(sum(as.numeric(res0_2)) + sum(inside_0))
+
+}
+
+grad_0 <- function(theta=1,y=1,n=1){
+  
+  res0_2 <- aux0_2(theta,y)
+  
+  n_obs = length(y)
+  ins_gr0 = matrix(NA,nrow=n_obs,ncol=length(theta))
+  
+  for (i in 1:n_obs){
+      
+     ins_gr0[i,] <- apply(attr(aux0_1(theta,y[i],0:n),"gradient"),2,sum)
+  
+  }
+  
+  - (apply(attr(res0_2,"gradient"),2,sum) + colSums(ins_gr0))
+  
+}
+
+```
+
+And now we optimise to find the mle for $\theta_2^*$:
+```{r, cache=TRUE, warning=FALSE}
+
+fit_optim0  <- function(par_sd = c(1,1),
+                        fn ,
+                        gr ,
+                        method = "BFGS",
+                        hessian   = T,
+                        y,
+                        n,
+                        N_samples = 100){
+  
+fit <- vector("list",
+              length = N_samples)
+
+for (i in 1:N_samples){
+  
+     fit[[i]]<-
+          optim(par = rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+          fn  = fn,
+          gr  = gr,
+          y =y,
+          n=n,
+          method  =method ,
+          hessian = hessian)
+     
+    
+  # check for numerical convergence first 
+  no_convergence <- fit[[i]]$convergence > 0
+  
+  # checks if asymptotic variances are possible to obtain
+  no_variance <- inherits(try(solve(fit[[i]]$hessian),
+                              silent = T), 
+                          "try-error")
+
+  null_variance <- F
+  NA_variance   <- F
+
+  if (!no_variance){
+    # checks if asymptotic variance are NaN
+    NA_variance <- as.logical(sum(is.nan(diag(solve(fit[[i]]$hessian)))))
+  
+  if(!NA_variance){
+    # checks if asymptotic variance are zero up to machine precision
+    null_variance <- as.logical(sum(diag(solve(fit[[i]]$hessian))< .Machine$double.eps ^ 0.5))
+    }
+  }
+  
+  fail <- no_variance | no_convergence | NA_variance | null_variance 
+  
+  if (fail){
+    fit[[i]]$value <- NA
+  }
+  
+ 
+  
+} 
+  
+  extract_negloglik <- 
+  function(optim_object){
+      optim_object$value
+  }
+# selects the optimisation with minimum negative loglikelihood
+nll_vals<-
+  lapply(X   = fit,
+        FUN  = extract_negloglik)
+
+fit[[which.min(nll_vals)]] # return the final selected optimisation
+
+  
+}
+
+fit2 <-fit_optim0(    par_sd  = c(1,1),
+                      fn      = nll_0,
+                      gr      = grad_0,
+                      method  = "BFGS",
+                      y       = y_sample_q1,
+                      n       = 10000, 
+                      hessian = T)
+
+fit2
+
+mle_0 = exp(fit2$par)
+mle_0
+
+```
+
+Now we compute the GLRT statistic using the MLE from before and the MLE under the null hypothesis and compare to a $\chi_1^2$ as we have restricted from 2 to 1 parameters in the null hypothesis:
+```{r}
+
+glrt_0 = 2*(-fit1$value + fit2$value)
+glrt_0
+
+qchisq(0.95,df=1)
+
+```
+Hence as the GLRT statistic is smaller than $\chi^2_{1,0.05}$, we do not reject the null hypothesis $H_0:\,\mu(\boldsymbol{\lambda}_*)=5$.
+
+## (ii)
+We now use the fact that $\lambda_2^*=5$ which means in our reparametrised model we have $\theta_2^*=log(5)$ so we now have a model just in terms of $\theta_1^*$.We define the new nll and gradient fucntions as follows: 
+```{r}
+
+expr1_1 <- expression(-log(1 + (y/(5 + 2*j))^2))
+expr1_2 <- expression(
+            atan(theta1)*y 
+            + 5*log(cos(atan(theta1)))
+            + 3*log(2)
+            + 2*lgamma(5/2)
+            - log(pi)
+            - lgamma(5)
+            ) 
+
+aux1_1 <- deriv(expr1_1,c("theta1"),function.arg=c("theta1","y","j"),hessian=TRUE) 
+aux1_2 <- deriv(expr1_2,c("theta1"),function.arg=c("theta1","y"),hessian=TRUE) 
+
+
+nll_1 <- function(theta=1,y=1, n=1) {
+  
+  res1_2 <- aux1_2(theta,y)
+  
+  n_obs = length(y)
+  inside_1 = rep(0,n_obs)
+  
+  for (i in 1:n_obs){
+      
+     inside_1[i] <- sum(aux1_1(theta,y[i],0:n))
+  
+}
+  -(sum(as.numeric(res1_2)) + sum(inside_1))
+
+}
+
+grad_1 <- function(theta=1,y=1,n=1){
+  
+  res1_2 <- aux1_2(theta,y)
+  
+  n_obs = length(y)
+  ins_gr1 = matrix(NA,nrow=n_obs,ncol=length(theta))
+  
+  for (i in 1:n_obs){
+      
+     ins_gr1[i,] <- apply(attr(aux1_1(theta,y[i],0:n),"gradient"),2,sum)
+  
+  }
+  
+  - (apply(attr(res1_2,"gradient"),2,sum) + colSums(ins_gr1))
+  
+}
+
+```
+
+And once again we put these into the BFGS algorithm to compute the MLE for $\theta_1^*$:
+
+```{r, cache=TRUE, warning=FALSE}
+
+fit3 <-fit_optim0(    par_sd  = c(1,1),
+                      fn      = nll_1,
+                      gr      = grad_1,
+                      method  = "BFGS",
+                      y       = y_sample_q1,
+                      n       = 10000, 
+                      hessian = T)
+
+fit3
+
+mle_1 = atan(fit3$par)
+mle_1
+```
+
+Now we compute the GLRT statistic using the MLE from before and the MLE under the null hypothesis and compare to a $\chi_1^2$ as we have restricted from 2 to 1 parameters in the null hypothesis:
+```{r}
+
+grlt_1 = 2*(-fit1$value + fit3$value)
+grlt_1
+
+qchisq(0.95,df=1)
+
+```
+Hence as the GLRT statistic is smaller than $\chi^2_{1,0.05}$, we do not reject the null hypothesis $H_0:\,\lambda^*_2=5$.
+
+
+
+
+
+## Question 7 [10 marks]
+
+Consider the following  data frame
+
+```{r}
+#| code-fold: show
+data_q7 <-read.table("http://people.bath.ac.uk/kai21/ASI/CW_2023/data_q7.txt")
+
+```
+that contains a bivariate sample 
+$$(x_1,y_1),\,(x_2,y_2),\,\ldots,\,(x_n,y_n)$$
+of size $n=300$.
+
+
+
+
+Use the parametric family $\mathcal F_1$ defined in Question 1 to find an appropriate model for the unknown conditional distribution of $\mathcal Y$ given $\mathcal X=x$, that is $f_*(y|x)$. 
+The model should be defined by  specifying the mean function $\mu(\boldsymbol{\theta}^{(1)},x)$ as follows:
+
+$$
+\mu(\boldsymbol{\theta}^{(1)},x) =g^{-1}(\theta_1+\theta_2\,x +\theta_3\,x^2+\theta_4\,x^3 +\cdots+\theta_{p+1}\,x^p)
+$$
+
+for some choice of link function $g$ and some choice of integer $p\geq 1$.
+
+
+From a set of candidate models (that is for different choices of $g$ and $p$),  choose the model with the smallest AIC (Akaike Information Criterion). Only present the results from the maximum likelihood estimation from the best chosen model and simply comment on the other models considered.
+
+Now, repeat the same process  above to find an appropriate model for the unknown conditional distribution of $\mathcal Y$ given $\mathcal X=x$ but now based on the Gamma parametric family:
+
+$$
+\mathcal F_{gamma}=\left\{f(y|\lambda_1,\lambda_2)=\frac{\lambda_2^{\lambda_1}}{\Gamma(\lambda_1)}y^{\lambda_1-1}\exp(-\lambda_2\,y)\,:\, \lambda_1>0\,,\lambda_2>0,y>0\right\}
+$$
+
+Finally, find an appropriate model for the unknown conditional distribution of $\mathcal Y$ given $\mathcal X=x$
+but now based on the Normal parametric family:
+
+$$
+\mathcal F_{normal}=\left\{f(y|\lambda_1,\lambda_2)=\frac{1}{\lambda_2\sqrt{2\pi}}\,\exp\left(-\frac{(y-\lambda_1)^2}{2\lambda_2^2}\right)\,:\, \lambda_1\in {\mathcal R},\,\lambda_2>0,y\in {\mathcal R}\right\}
+$$
+
+
+For each of the three chosen models, you should plot the data together with the maximum likelihood estimate of the mean function as well as corresponding asymptotic 95\% confidence bands in the range $x\in(-3,3)$. Comment on the differences between the confidence bands and the mean function estimates. You must select the best model out of the three, based on the Akaike  Information Criterion. 
+
+
+## Solution to Question 7
+
+## (i) using $\mathcal F_1$
+First, we plot the data so we can visualize it.
+```{r}
+plot(y~x, data=data_q7, pch=".",cex=3)
+```
+
+
+
+We now reparametrise our model in terms of $\mu$ and $\theta_2$ using the relationship $\theta_1 = \mu / \exp(\theta_2)$. Then, we will be able to optimize to find how $\mu$ changes with respect to x. 
+```{r}
+expr_17 <- expression(-log(1 + (y/(exp(theta2) + 2*j))^2))
+expr_27 <- expression(
+            atan(mu/exp(theta2))*y 
+            + exp(theta2)*log(cos(atan(mu/exp(theta2))))
+            + (exp(theta2) - 2)*log(2)
+            + 2*lgamma(exp(theta2)/2)
+            - log(pi)
+            - lgamma(exp(theta2))
+            ) 
+
+aux_17 <- deriv(expr_17,c("mu","theta2"),function.arg=c("mu","theta2","y","j"),hessian=TRUE) 
+aux_27 <- deriv(expr_27,c("mu", "theta2"),function.arg=c("mu","theta2","y"),hessian=TRUE) 
+
+
+nll7 <- function(theta=c(1,1),y=1, n=1) {
+  
+  res_27 <- aux_27(theta[1],theta[2],y)
+  
+  inside7 = rep(0,n)
+  n_obs = length(y)
+  
+  for (i in 1:n_obs){
+      
+     inside7[i] <- sum(aux_17(theta[1],theta[2],y[i],0:n))
+  
+}
+  -(sum(as.numeric(res_27)) + sum(inside7))
+
+}
+
+grad7 <- function(theta=c(1,1),y=1,n=1){
+  
+  res_27 <- aux_27(theta[1],theta[2],y)
+  
+  n_obs = length(y)
+  ins_gr7 = matrix(NA,nrow=n_obs,ncol=length(theta))
+  
+  for (i in 1:n_obs){
+      
+     ins_gr7[i,] <- apply(attr(aux_17(theta[1],theta[2],y[i],0:n),"gradient"),2,sum)
+  
+  }
+  
+  - (apply(attr(res_27,"gradient"),2,sum) + colSums(ins_gr7))
+  
+}
+```
+
+We split the x data into 3 bins so that we can study the relationship between $\mu$ and x.
+```{r, warning=FALSE}
+mu_op <- exp(theta2_op)*theta1_op
+n_bins<-3
+
+dat.matrix<-data_q7
+x_7<-dat.matrix$x
+y_7<-dat.matrix$y
+n<-length(x_7)
+
+
+dat.matrix <- dat.matrix %>% 
+                  mutate(x_disc = cut_number(x_7, n_bins,labels=F))
+
+
+mu_disc <- rep(NA,n_bins)
+mu_disc_up    <-rep(NA,n_bins)
+mu_disc_low    <-rep(NA,n_bins)
+
+xx <-rep(NA,n_bins)
+
+for (i in 1:n_bins){
+  ind  <- which(dat.matrix$x_disc==i) 
+  samp  <- dat.matrix$y[ind]
+  xx[i] <- median(dat.matrix$x[ind])
+ 
+  if (i==1){
+    center <- rep(0,4)
+  }else{
+    center <- optim_7$par
+  }
+  optim_7 <- fit_optim(par1_data = mu_op ,
+                       par2_data = theta2_op,
+                       fn      = nll7,
+                       gr      = grad7,
+                       method  = "BFGS",
+                       y       = samp,
+                       n       = 100,
+                      hessian = T)
+
+std.err7<-sqrt(diag(solve(optim_7$hessian)))
+
+mu_disc   [i] <- optim_7$par[1]
+
+mu_disc_low   [i] <- optim_7$par[1]-1.96*std.err7[1]
+
+mu_disc_up   [i] <- optim_7$par[1]+1.96*std.err7[1]
+
+
+}
+
+
+plot(xx,mu_disc,type="l",ylab="mu",xlab="x", ylim=c(13,25))
+lines(xx,mu_disc_low,col="blue")
+lines(xx,mu_disc_up,col="blue")
+legend("topleft",legend=c("MLE","95% CI"),col=c("black","blue"),lty=1)
+```
+
+Based on the plot, a quadratic relationship between $\mu$ and x looks realistic so this is where we start. We assume the relationship $\mu = a + bx + cx^2$ and define the new negative log-likelihood and gradient functions, starting with g as the identity function. We then tried g=log, but the plot of this function was not a good fit. Then g=exp returned a greater AIC. We then tried linear, cubic and quartic models which returned a greater AIC also. Hence we stick with the model $\mu = a + bx + cx^2$, which is shown below.
+```{r}
+
+expr1_x <- expression(-log(1 + (y/(exp(theta2) + 2*j))^2))
+expr2_x <- expression(
+            atan((a*Cos(b+c*x+d*x^2))/exp(theta2))*y 
+            + exp(theta2)*log(cos(atan((a*Cos(b+c*x+d*x^2))/exp(theta2))))
+            + (exp(theta2) - 2)*log(2)
+            + 2*lgamma(exp(theta2)/2)
+            - log(pi)
+            - lgamma(exp(theta2))
+            ) 
+
+aux1_x <- deriv(expr1_x,c("a","b","c","d","theta2"),function.arg=c("a","b","c","d","theta2","y","j"),hessian=TRUE) 
+aux2_x <- deriv(expr2_x,c("a","b","c","d","theta2"),function.arg=c("a","b","c","d","theta2","y","x"),hessian=TRUE) 
+
+
+nll_x <- function(theta=c(1,1,1,1,1),y=1, x=1, n=1) {
+  
+  res2_x <- aux2_x(theta[1],theta[2],theta[3],theta[4],theta[5],y,x)
+  
+  inside_x = rep(0,n)
+  n_obs = length(y)
+  
+  for (i in 1:n_obs){
+      
+     inside_x[i] <- sum(aux1_x(theta[1],theta[2],theta[3],theta[4],theta[5],y[i],0:n))
+  
+}
+  -(sum(as.numeric(res2_x)) + sum(inside_x))
+
+}
+
+grad_x <- function(theta=c(1,1,1,1,1),y=1,x=1,n=1){
+  
+  res2_x <- aux2_x(theta[1],theta[2],theta[3],theta[4],theta[5],y,x)
+  
+  n_obs = length(y)
+  ins_gr_x = matrix(NA,nrow=n_obs,ncol=length(theta))
+  
+  for (i in 1:n_obs){
+      
+     ins_gr_x[i,] <- apply(attr(aux1_x(theta[1],theta[2],theta[3],theta[4],theta[5],y[i],0:n),"gradient"),2,sum)
+  
+  }
+  
+  - (apply(attr(res2_x,"gradient"),2,sum) + colSums(ins_gr_x))
+  
+}
+
+```
+
+Now we can optimize to find the MLEs for a,b,c and $\lambda_2$:
+```{r, cache=TRUE, warning=FALSE}
+fit_optim1  <- function(par_sd = c(1,1),
+                        fn ,
+                        gr ,
+                        method = "BFGS",
+                        hessian   = T,
+                        y,
+                        x,
+                        n,
+                        N_samples = 100){
+  
+fit <- vector("list",
+              length = N_samples)
+
+for (i in 1:N_samples){
+  
+     fit[[i]]<-
+          optim(par = c(rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2])),
+          fn  = fn,
+          gr  = gr,
+          y =y,
+          x=x,
+          n=n,
+          method  =method ,
+          hessian = hessian)
+     
+    
+  # check for numerical convergence first 
+  no_convergence <- fit[[i]]$convergence > 0
+  
+  # checks if asymptotic variances are possible to obtain
+  no_variance <- inherits(try(solve(fit[[i]]$hessian),
+                              silent = T), 
+                          "try-error")
+
+  null_variance <- F
+  NA_variance   <- F
+
+  if (!no_variance){
+    # checks if asymptotic variance are NaN
+    NA_variance <- as.logical(sum(is.nan(diag(solve(fit[[i]]$hessian)))))
+  
+  if(!NA_variance){
+    # checks if asymptotic variance are zero up to machine precision
+    null_variance <- as.logical(sum(diag(solve(fit[[i]]$hessian))< .Machine$double.eps ^ 0.5))
+    }
+  }
+  
+  fail <- no_variance | no_convergence | NA_variance | null_variance 
+  
+  if (fail){
+    fit[[i]]$value <- NA
+  }
+  
+ 
+  
+} 
+  
+  extract_negloglik <- 
+  function(optim_object){
+      optim_object$value
+  }
+# selects the optimisation with minimum negative loglikelihood
+nll_vals<-
+  lapply(X   = fit,
+        FUN  = extract_negloglik)
+
+fit[[which.min(nll_vals)]] # return the final selected optimisation
+
+  
+}
+
+fit4 <-fit_optim1(    par_sd  = c(1,1),
+                      fn      = nll_x,
+                      gr      = grad_x,
+                      method  = "BFGS",
+                      y       = y_7,
+                      x       = x_7,
+                      n       = 10000,
+                      hessian = T)
+
+fit4
+```
+
+And now we can check the plot and the AIC to check it's a good model:
+```{r, warning=FALSE}
+
+x_plot = seq(-3,3,length=100)
+
+mean_func <- function(x){
+  
+  (fit4$par[1] + fit4$par[2]*x + fit4$par[3]*x^2)
+  
+}
+
+var_func <- function(x){
+  
+  J <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  J%*%(solve(fit4$hessian))%*%t(J)
+  
+}
+
+
+
+plot(y~x, data=data_q7, pch=".",cex=3)
+lines(x_plot,mean_func(x_plot),col="red")
+lines(x_plot,mean_func(x_plot) - 1.96*sqrt(array(var_func(x_plot))),col="green")
+lines(x_plot,mean_func(x_plot) + 1.96*sqrt(array(var_func(x_plot))),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI"),col=c("red","green"),lty=1)
+
+
+```
+
+```{r}
+
+aic_1 <- 2*(fit4$value + length(fit4$par))
+aic_1
+
+```
+
+## (ii) using $\mathcal F_{gamma}$
+
+Now for the gamma distribution, we need to write new negative log-likelihood and gradient functions, using the reparametrisations $\theta_1 = \log(\lambda_1)$ and $\theta_2 = \log(\lambda_2)$. Then also reparametrising in terms of $\mu$ we have $\mu = \lambda_1/\lambda_2 = \exp(\theta_1)\exp(\theta_2)$ or $\theta_2 = \theta_1 - \log(\mu)$.
+
+Then we again start by testing $\mu = a + bx + cx^2$. We then tried link functions g = exp, log, cos and sin and either they gave a greater AIC or the plot did not show a good fit. We tried linear and cubic models but these did not work well, hence we also tried a combination of an exponential link function along with cubic and linear models, but these produced a greater AIC. Hence, we stick with the identity link function and a quadratic model, as shown below:
+```{r}
+
+gam_expr <- expression(exp(theta1)*(theta1 - log(a + b*x + c*x^2)) - lgamma(exp(theta1)) + (exp(theta1)-1)*log(y) - exp(theta1 - log(a + b*x + c*x^2))*y)
+
+gam_aux <- deriv(gam_expr,c("a","b","c","theta1"),function.arg=c("a","b","c","theta1","y","x"),hessian=TRUE) 
+
+nll_gam <- function(theta=c(1,1,1,1),y=1,x=1) {
+  
+  res_gam <- gam_aux(theta[1],theta[2],theta[3],theta[4],y,x)
+  
+  -sum(as.numeric(res_gam))
+
+}
+
+grad_gam <- function(theta=c(1,1,1,1),y=1,x=1) {
+  
+  res_gam <- gam_aux(theta[1],theta[2],theta[3],theta[4],y,x)
+  
+  -apply(attr(res_gam,"gradient"),2,sum)
+
+}
+
+```
+
+
+```{r, warning=FALSE}
+
+fit_optim_gam  <- function(par_sd = c(1,1),
+                       fn ,
+                       gr ,
+                       method = "BFGS",
+                       hessian   = T,
+                       y,
+                       x,
+                       N_samples = 100){
+  
+fit <- vector("list",
+              length = N_samples)
+
+for (i in 1:N_samples){
+  
+     fit[[i]]<-
+          optim(par = c(rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2]),
+                        rnorm(1,mean=par_sd[1],sd=par_sd[2])),
+          fn  = fn,
+          gr  = gr,
+          y =y,
+          x=x,
+          method  =method ,
+          hessian = hessian)
+     
+    
+  # check for numerical convergence first 
+  no_convergence <- fit[[i]]$convergence > 0
+  
+  # checks if asymptotic variances are possible to obtain
+  no_variance <- inherits(try(solve(fit[[i]]$hessian),
+                              silent = T), 
+                          "try-error")
+
+  null_variance <- F
+  NA_variance   <- F
+
+  if (!no_variance){
+    # checks if asymptotic variance are NaN
+    NA_variance <- as.logical(sum(is.nan(diag(solve(fit[[i]]$hessian)))))
+  
+  if(!NA_variance){
+    # checks if asymptotic variance are zero up to machine precision
+    null_variance <- as.logical(sum(diag(solve(fit[[i]]$hessian))< .Machine$double.eps ^ 0.5))
+    }
+  }
+  
+  fail <- no_variance | no_convergence | NA_variance | null_variance 
+  
+  if (fail){
+    fit[[i]]$value <- NA
+  }
+  
+ 
+  
+} 
+  
+  extract_negloglik <- 
+  function(optim_object){
+      optim_object$value
+  }
+# selects the optimisation with minimum negative loglikelihood
+nll_vals<-
+  lapply(X   = fit,
+        FUN  = extract_negloglik)
+
+fit[[which.min(nll_vals)]] # return the final selected optimisation
+
+  
+}
+
+fit_gam <- fit_optim_gam(par_sd=c(10,1),
+                       fn=nll_gam ,
+                       gr=grad_gam ,
+                       method = "BFGS",
+                       hessian   = T,
+                       y=y_7,
+                       x=x_7,
+                       N_samples = 100)
+fit_gam
+
+
+```
+And again we can plot the data and check the AIC to see if it's a good model:
+```{r, warning=FALSE}
+x_plot = seq(-3,3,length=100)
+
+mean_func_gam <- function(x){
+  
+  (fit_gam$par[1] + fit_gam$par[2]*x + fit_gam$par[3]*x^2)
+  
+}
+
+var_func_gam <- function(x){
+  
+  J <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  J%*%(solve(fit_gam$hessian))%*%t(J)
+  
+}
+
+plot(y~x, data=data_q7, pch=".",cex=3)
+lines(x_plot,mean_func_gam(x_plot),col="red")
+lines(x_plot,mean_func(x_plot) - 1.96*sqrt(array(var_func(x_plot))),col="green")
+lines(x_plot,mean_func(x_plot) + 1.96*sqrt(array(var_func(x_plot))),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI"),col=c("red","green"),lty=1)
+
+```
+```{r}
+
+aic_2 <- 2*(fit_gam$value + length(fit_gam$par))
+aic_2
+
+```
+
+## (iii) using $\mathcal F_{normal}$
+Now for the normal distribution, we need to write new negative log-likelihood and gradient functions, using the reparametrisations $\mu = \lambda_1$ and $\theta_2 = \log(\lambda_2)$.
+
+Then we again start by testing $\mu = a + bx + cx^2$. Once again we then tried link functions g = exp, log, cos and sin they all gave a greater. We tried linear and cubic models but these did not work well, hence we also tried a combination of an exponential link function along wih cubic and linear models, but these produced a greater AIC. Hence, we stick with the identity link function and a quadratic model, as shown below:
+```{r, warning=FALSE}
+
+norm_expr <- expression(-theta2 - 0.5*log(2*pi) - (((y - (a + b*x + c*x^2))^2) / (2*(exp(theta2))^2)))
+norm_aux <- deriv(norm_expr,c("a","b","c","theta2"),function.arg=c("a","b","c","theta2","y","x"),hessian=TRUE) 
+
+nll_norm <- function(theta=c(1,1,1,1),y=1,x=1) {
+  
+  res_norm <- norm_aux(theta[1],theta[2],theta[3],theta[4],y,x)
+  
+  -sum(as.numeric(res_norm))
+
+}
+
+grad_norm <- function(theta=c(1,1,1,1),y=1,x=1) {
+  
+  res_norm<- norm_aux(theta[1],theta[2],theta[3],theta[4],y,x)
+  
+  -apply(attr(res_norm,"gradient"),2,sum)
+
+}
+
+fit_norm <- fit_optim_gam(par_sd=c(0,0.0001),
+                       fn=nll_norm ,
+                       gr=grad_norm ,
+                       method = "BFGS",
+                       hessian   = T,
+                       y=y_7,
+                       x=x_7,
+                       N_samples = 100)
+fit_norm
+
+```
+
+And again we can plot the data and check the AIC to see if it's a good model:
+```{r, warning=FALSE}
+x_plot = seq(-3,3,length=100)
+
+mean_func_norm <- function(x){
+  
+  (fit_norm$par[1] + fit_norm$par[2]*x + fit_norm$par[3]*x^2)
+  
+}
+
+var_func_norm <- function(x){
+  
+  J <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  J%*%(solve(fit_norm$hessian))%*%t(J)
+  
+}
+
+plot(y~x, data=data_q7, pch=".",cex=3)
+lines(x_plot,mean_func_gam(x_plot),col="red")
+lines(x_plot,mean_func(x_plot) - 1.96*sqrt(array(var_func(x_plot))),col="green")
+lines(x_plot,mean_func(x_plot) + 1.96*sqrt(array(var_func(x_plot))),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI"),col=c("red","green"),lty=1)
+
+```
+
+```{r}
+
+aic_3 <- 2*(fit_norm$value + length(fit_norm$par))
+aic_3
+
+```
+
+## (iv) - conclusion
+
+To conclude, the mean function plots look very similar for all three distributions, this is becasue the quadratic model with identity link function was the best fitting model for all three. Clearly, the model based on the $\mathcal F_1$ parametric family has the lowest AIC, so we select this as our best model.
+
+
+## Question 8 [4 marks]
+
+
+
+
+Use the data in Question 7  to compute 95\% confidence intervals for the least worse value of the mean function  at each $x$, that is $\mu(\boldsymbol{\theta}^{(1)}_\dagger,x)$
+for each of the three parametric families: $\mathcal F_1$, the Gamma and the Normal. Plot the computed confidence bands in the range $x\in(-3,3)$ for each parametric family and comment on the differences obtained.
+
+
+## Solution to Question 8
+
+## (i) $\mathcal F_1$
+
+Starting with $\mathcal F_1$. We need to define a function which computes $\hat{\mathcal{K}}$ for a given $x$.
+```{r}
+
+K_comp <- function(y,x,n){
+  
+  n_obs_k <- length(y)
+  log_grad <- matrix(0,nrow=4,ncol=4)
+  
+  for (i in 1:n_obs_k){
+    
+      log_grad = log_grad + (grad_x(c(fit4$par[1],fit4$par[2],fit4$par[3],fit4$par[4]), y=y[i],x=x,n=n))%*%t(grad_x(c(fit4$par[1],fit4$par[2],fit4$par[3],fit4$par[4]), y=y[i],x=x,n=n))
+    
+  }
+  
+  log_grad / n_obs_k
+  
+}
+
+```
+
+Now we use delta method and proposition 3.7 to find the confidence interval for $\mu$ for a given $x$. We know the Jacobian of $\mu$ is $(1,x,x^2,0)$. Hence we use the hessian from Q7 as an estimate for $\mathcal{J}$ and compute the variance as $\boldsymbol{J_g}\hat{\mathcal{J}}^{-1}\hat{\mathcal{K}}\hat{\mathcal{J}}^{-1}\boldsymbol{J_g}^T$ and we can use this to plot our 95% confidence intervals for the least worse value of the mean.
+```{r, warning=FALSE}
+
+var_func8 <- function(y,x,n){
+  
+  jacobian_8 <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  jacobian_8 %*% solve(fit4$hessian) %*% K_comp(y,x,n) %*% solve(fit4$hessian) %*% t(jacobian_8)
+  
+}
+
+
+plot(x_plot,mean_func(x_plot),col="red", type="l",ylim=c(-25,70),xlab="x",ylab=expression(mu))
+lines(x_plot,mean_func(x_plot) - 1.96*sqrt(var_func8(y_7,x_plot,100)),col="green")
+lines(x_plot,mean_func(x_plot) + 1.96*sqrt(var_func8(y_7,x_plot,100)),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI of least worse value"),col=c("red","green"),lty=1)
+
+
+```
+
+## (ii) $\mathcal F_{gamma}$
+
+Now onto $\mathcal F_{gamma}$. We need to define a function which computes $\hat{\mathcal{K}}$ for a given $x$.
+```{r}
+
+K_comp2 <- function(y,x){
+  
+  n_obs_k2 <- length(y)
+  log_grad2 <- matrix(0,nrow=4,ncol=4)
+  
+  for (i in 1:n_obs_k2){
+    
+      log_grad2 = log_grad2 + (grad_gam(c(fit_gam$par[1],fit_gam$par[2],fit_gam$par[3],fit_gam$par[4]), y=y[i],x=x))%*%t(grad_gam(c(fit_gam$par[1],fit_gam$par[2],fit_gam$par[3],fit_gam$par[4]), y=y[i],x=x))
+    
+  }
+  
+  log_grad2 / n_obs_k2
+  
+}
+
+```
+
+Now we use delta method and proposition 3.7 again like in part (i)
+```{r, warning=FALSE}
+
+var_func82 <- function(y,x){
+  
+  jacobian_82 <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  jacobian_82 %*% solve(fit_gam$hessian) %*% K_comp2(y,x) %*% solve(fit_gam$hessian) %*% t(jacobian_82)
+  
+}
+
+
+plot(x_plot,mean_func_gam(x_plot),col="red", type="l",ylim=c(-25,85),xlab="x",ylab=expression(mu))
+lines(x_plot,mean_func_gam(x_plot) - 1.96*sqrt(var_func82(y_7,x_plot)),col="green")
+lines(x_plot,mean_func_gam(x_plot) + 1.96*sqrt(var_func82(y_7,x_plot)),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI of least worse value"),col=c("red","green"),lty=1)
+
+
+```
+
+## (iii) $\mathcal F_{normal}$
+
+Now onto $\mathcal F_{normal}$. We need to define a function which computes $\hat{\mathcal{K}}$ for a given $x$.
+```{r}
+
+K_comp3 <- function(y,x){
+  
+  n_obs_k3 <- length(y)
+  log_grad3 <- matrix(0,nrow=4,ncol=4)
+  
+  for (i in 1:n_obs_k3){
+    
+      log_grad3 = log_grad3 + (grad_norm(c(fit_norm$par[1],fit_norm$par[2],fit_norm$par[3],fit_norm$par[4]), y=y[i],x=x))%*%t(grad_norm(c(fit_norm$par[1],fit_norm$par[2],fit_norm$par[3],fit_norm$par[4]), y=y[i],x=x))
+    
+  }
+  
+  log_grad3 / n_obs_k3
+  
+}
+
+```
+
+Now we use delta method and proposition 3.7 again like in part (i) and (ii)
+```{r, warning=FALSE}
+
+var_func83 <- function(y,x){
+  
+  jacobian_83 <- matrix(c(1,x,x^2,0),nrow=1,ncol=4)
+  
+  jacobian_83 %*% solve(fit_norm$hessian) %*% K_comp3(y,x) %*% solve(fit_norm$hessian) %*% t(jacobian_83)
+  
+}
+
+
+plot(x_plot,mean_func_norm(x_plot),col="red", type="l",ylim=c(-25,70),xlab="x",ylab=expression(mu))
+lines(x_plot,mean_func_norm(x_plot) - 1.96*sqrt(var_func83(y_7,x_plot)),col="green")
+lines(x_plot,mean_func_norm(x_plot) + 1.96*sqrt(var_func83(y_7,x_plot)),col="green")
+legend("topleft",legend=c("MLE of mean function","95% CI of least worse value"),col=c("red","green"),lty=1)
+
+
+```
+
+The confidence band for the normal model is the narrowest, followed by the $\mathcal{F}_1$ model and then the gamma model. 
+
+
+
